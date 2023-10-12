@@ -13,7 +13,7 @@ gamma = 0.4*delta**2
 beta = 1.25
 lambda_ = beta
 g = gamma
-f = rho*g
+fdown = rho*g
 
 n_length = 10
 n_width = 3
@@ -57,7 +57,7 @@ def solve_clamped_beam_fenics():
 	u = fe.TrialFunction(V)
 	d = u.geometric_dimension()  # space dimension
 	v = fe.TestFunction(V)
-	f = fe.Constant((0, -f))
+	f = fe.Constant((0, -fdown))
 	T = fe.Constant((0, 0))
 	a = fe.inner(sigma(u), epsilon(v))*fe.dx
 	L = fe.dot(f, v)*fe.dx + fe.dot(T, v)*fe.ds
@@ -75,7 +75,12 @@ def solve_clamped_beam_fenics():
 	return coordinates_before, coordinates_after
 
 
+# Test plotting. 
+coorbefore, coorafter = solve_clamped_beam_fenics()
 
+plt.scatter(coorbefore[:, 0], coorbefore[:, 1], label='Before')
+plt.scatter(coorafter[:, 0], coorafter[:, 1], label='Before')
+plt.show()
 
 
 

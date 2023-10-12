@@ -30,10 +30,10 @@ gamma = 0.4*delta**2
 beta = 1.25
 lambda_ = beta
 g = gamma
-f = [0, -rho*g*100]
+f = [0, -rho*g]
 
-n_length = 10
-n_width = 3
+n_length = 11 # + 1
+n_width = 4 # + 1
 
 def solve_clamped_beam_pytorch(n_hid, n_neu, epochs):
 	"""
@@ -43,7 +43,6 @@ def solve_clamped_beam_pytorch(n_hid, n_neu, epochs):
 	n_neu = Number of neurons in each hidden layer.
 
 	"""
-
 	n_inputs = 2    # x and y.
 	n_outputs = 2   # x and y. 
 
@@ -60,6 +59,7 @@ def solve_clamped_beam_pytorch(n_hid, n_neu, epochs):
 	dirichlet = np.arange(0, n_width * n_length, n_length)
 	bxij, byij = bxij.flatten(), byij.flatten()
 
+	losses = []
 
 	for epoch in range(epochs):
 		optimizer.zero_grad() # to make the gradients zero
@@ -89,20 +89,19 @@ def solve_clamped_beam_pytorch(n_hid, n_neu, epochs):
 		zeros_collcation = Variable(torch.from_numpy(np.zeros((len(txc), 1))).float(), requires_grad=False).to(device)
 
 		res_x, res_y = navier_cauchy(txc, tyc, net)
+		
 		mse_xc = mse_cost_function(zeros_collcation, res_x)
 		mse_yc = mse_cost_function(zeros_collcation, res_y)
 		mse_cc = mse_xc + mse_yc
-
+		
 		loss = mse_bc + mse_cc
-
-		print(mse_bc)
-		print(bcx)
-		print(bcy)
+		print(loss)
+		losses.append(loss.detach().numpy())
 
 		loss.backward() # This is for computing gradients using backward propagation
 		optimizer.step() # This is equivalent to : theta_new = theta_old - alpha * derivative of J w.r.t theta
 	
-	return net
+	return net, losses
 
 class Net(nn.Module):
 	def __init__(self, num_hidden_layers, num_neurons, ninputs, noutputs):
@@ -127,10 +126,10 @@ class Net(nn.Module):
 		Forward step of the neural network. 
 		"""
 		layer_inputs = torch.cat(inputs, axis=1) 
-		layer = torch.sigmoid(self.hidden_layers[0](layer_inputs))
+		layer = torch.tanh(self.hidden_layers[0](layer_inputs))
 
 		for hl in range(1, self.num_hidden_layers):
-			layer = torch.sigmoid(self.hidden_layers[hl](layer))
+			layer = torch.tanh(self.hidden_layers[hl](layer))
 
 		output = self.output_layer(layer) 
 		return output
@@ -145,28 +144,30 @@ def navier_cauchy(x, y, net):
 	u_x = u[:, 0]
 	u_y = u[:, 1]
 
-	u_x1x = torch.autograd.grad(u_x, x, grad_outputs=torch.ones_like(u_x), create_graph=True)[0]
-	u_x1y = torch.autograd.grad(u_x, y, grad_outputs=torch.ones_like(u_x), create_graph=True)[0]
-	u_y1y = torch.autograd.grad(u_y, y, grad_outputs=torch.ones_like(u_y), create_graph=True)[0]
-	u_y1x = torch.autograd.grad(u_y, x, grad_outputs=torch.ones_like(u_y), create_graph=True)[0]
+	u_x1x = diff(u_x, x) 
+	u_x1y = diff(u_x, y)
+	u_y1y = diff(u_y, y)
+	u_y1x = diff(u_y, x)
 	
-	u_x2x = torch.autograd.grad(u_x1x, x, grad_outputs=torch.ones_like(u_x1x), create_graph=True)[0]
-	u_y1xy = torch.autograd.grad(u_y1y, x, grad_outputs=torch.ones_like(u_y1y), create_graph=True)[0]
-	u_x2y = torch.autograd.grad(u_x1y, y, grad_outputs=torch.ones_like(u_x1y), create_graph=True)[0]
+	u_x2x = diff(u_x1x, x)  
+	u_y1xy = diff(u_y1y, x) 
+	u_x2y = diff(u_x1y, y)  
 
-	residue_x = (lambda_ + mu) * (u_x2x + u_y1xy) + mu * (u_x2x + u_x2y) + f[0]
+	u_x1yx = diff(u_x1x, y)
+	u_y2y = diff(u_y1y, y) 
+	u_y2x = diff(u_y1x, x)
 
-	u_x1yx = torch.autograd.grad(u_x1x, y, grad_outputs=torch.ones_like(u_x1x), create_graph=True)[0]
-	u_y2y = torch.autograd.grad(u_y1y, y, grad_outputs=torch.ones_like(u_y1y), create_graph=True)[0]
-	u_y2x = torch.autograd.grad(u_y1x, x, grad_outputs=torch.ones_like(u_y1x), create_graph=True)[0]
-
-	residue_y = (lambda_ + mu) * (u_x1yx + u_y2y) + mu * (u_y2x + u_y2y) + f[1]
+	residue_x = (lambda_ + mu) * (u_x2x + u_y1xy) + mu * (u_x2x + u_x2y) - f[0]
+	residue_y = (lambda_ + mu) * (u_x1yx + u_y2y) + mu * (u_y2x + u_y2y) - f[1]
 
 	return residue_x, residue_y
 
+def diff(u, d):
+	return torch.autograd.grad(u, d, grad_outputs=torch.ones_like(u), create_graph=True, retain_graph=True)[0]
+
 import matplotlib.pyplot as plt
-# Tets
-network = solve_clamped_beam_pytorch(5, 5, 1000)
+# Tests
+network, losses = solve_clamped_beam_pytorch(12, 5, 1000)
 
 # Boundary conditions. 
 x = np.linspace(0, lenght, n_length)
@@ -186,6 +187,5 @@ for i in x:
 
 plt.grid()
 plt.show()
-
 
 
