@@ -17,8 +17,11 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.autograd import Variable
+from tqdm import tqdm
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+from torch.optim import lr_scheduler
 
+torch.manual_seed(2023)
 np.random.seed(2023)
 
 # Constants
@@ -35,7 +38,7 @@ f = [0, -rho*g]
 n_length = 11 # + 1
 n_width = 4 # + 1
 
-def solve_clamped_beam_pytorch(n_hid, n_neu, epochs):
+def solve_clamped_beam_pytorch(n_hid, n_neu, epochs, lr):
 	"""
 	PARAMETERS:
 
@@ -43,14 +46,15 @@ def solve_clamped_beam_pytorch(n_hid, n_neu, epochs):
 	n_neu = Number of neurons in each hidden layer.
 
 	"""
-	n_inputs = 2    # x and y.
-	n_outputs = 2   # x and y. 
+	n_inputs =  2   # x and y.
+	n_outputs = 2   # displacement in x and y. 
 
 	# Neural network.
 	net = Net(n_hid, n_neu, n_inputs, n_outputs)
 	net = net.to(device)
 	mse_cost_function = torch.nn.MSELoss() 			# Mean squared error
-	optimizer = torch.optim.Adam(net.parameters())  # Can experiment with different optimizers.
+	optimizer = torch.optim.Adam(net.parameters(), lr=lr)  # Can experiment with different optimizers.
+	scheduler = lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.5)
 
 	# Boundary conditions. 
 	bx = np.linspace(0, lenght, n_length)
@@ -59,49 +63,49 @@ def solve_clamped_beam_pytorch(n_hid, n_neu, epochs):
 	dirichlet = np.arange(0, n_width * n_length, n_length)
 	bxij, byij = bxij.flatten(), byij.flatten()
 
-	losses = []
+	with tqdm(total=epochs, desc="Epochs") as epoch_pbar:
+		for epoch in range(epochs):
+			optimizer.zero_grad() # to make the gradients zero
 
-	for epoch in range(epochs):
-		optimizer.zero_grad() # to make the gradients zero
+			# Boundary loss.
+			tbx = Variable(torch.from_numpy(bxij.reshape((len(bxij), 1))).float(), requires_grad=False).to(device)
+			tby = Variable(torch.from_numpy(byij.reshape((len(byij), 1))).float(), requires_grad=False).to(device)
+			zeros_bc = Variable(torch.from_numpy(np.zeros((len(dirichlet), 1))).float(), requires_grad=False).to(device)
+			predicted_bc = net([tbx, tby])
+			bcx = predicted_bc[:, 0][dirichlet].reshape(len(zeros_bc), 1)
+			bcy = predicted_bc[:, 1][dirichlet].reshape(len(zeros_bc), 1)
 
-		# Boundary loss.
-		tbx = Variable(torch.from_numpy(bxij.reshape((len(bxij), 1))).float(), requires_grad=False).to(device)
-		tby = Variable(torch.from_numpy(byij.reshape((len(byij), 1))).float(), requires_grad=False).to(device)
-		zeros_bc = Variable(torch.from_numpy(np.zeros((len(dirichlet), 1))).float(), requires_grad=False).to(device)
-		predicted_bc = net([tbx, tby])
-		bcx = predicted_bc[:, 0][dirichlet].reshape(len(zeros_bc), 1)
-		bcy = predicted_bc[:, 1][dirichlet].reshape(len(zeros_bc), 1)
+			mse_ux = mse_cost_function(zeros_bc, bcx)
+			mse_uy = mse_cost_function(zeros_bc, bcy)
+			mse_bc = mse_ux + mse_uy
 
-		mse_ux = mse_cost_function(zeros_bc, bcx)
-		mse_uy = mse_cost_function(zeros_bc, bcy)
-		mse_bc = mse_ux + mse_uy
+			# Collocation points. 
+			xc = np.random.uniform(low=0.0, high=lenght, size=n_length)
+			yc = np.random.uniform(low=0.0, high=width, size=n_width)
 
-		# Collocation points. 
-		xc = np.random.uniform(low=0.0, high=lenght, size=n_length)
-		yc = np.random.uniform(low=0.0, high=width, size=n_width)
+			xcij, ycij = np.meshgrid(xc, yc)
+			xcij, ycij = xcij.flatten(), ycij.flatten()
+			xcij, ycij = xcij.reshape((len(xcij), 1)), ycij.flatten().reshape((len(xcij), 1))
 
-		xcij, ycij = np.meshgrid(xc, yc)
-		xcij, ycij = xcij.flatten(), ycij.flatten()
-		xcij, ycij = xcij.reshape((len(xcij), 1)), ycij.flatten().reshape((len(xcij), 1))
+			txc = Variable(torch.from_numpy(xcij).float(), requires_grad=True).to(device)
+			tyc = Variable(torch.from_numpy(ycij).float(), requires_grad=True).to(device)
+			zeros_collcation = Variable(torch.from_numpy(np.zeros((len(txc), 1))).float(), requires_grad=False).to(device)
 
-		txc = Variable(torch.from_numpy(xcij).float(), requires_grad=True).to(device)
-		tyc = Variable(torch.from_numpy(ycij).float(), requires_grad=True).to(device)
-		zeros_collcation = Variable(torch.from_numpy(np.zeros((len(txc), 1))).float(), requires_grad=False).to(device)
+			res_x, res_y = navier_cauchy(txc, tyc, net)
+			
+			mse_xc = mse_cost_function(zeros_collcation, res_x)
+			mse_yc = mse_cost_function(zeros_collcation, res_y)
+			mse_cc = mse_xc + mse_yc
+			
+			loss = 100*mse_bc + mse_cc
 
-		res_x, res_y = navier_cauchy(txc, tyc, net)
-		
-		mse_xc = mse_cost_function(zeros_collcation, res_x)
-		mse_yc = mse_cost_function(zeros_collcation, res_y)
-		mse_cc = mse_xc + mse_yc
-		
-		loss = mse_bc + mse_cc
-		print(loss)
-		losses.append(loss.detach().numpy())
 
-		loss.backward() # This is for computing gradients using backward propagation
-		optimizer.step() # This is equivalent to : theta_new = theta_old - alpha * derivative of J w.r.t theta
-	
-	return net, losses
+			loss.backward() # This is for computing gradients using backward propagation
+			optimizer.step()
+			scheduler.step() # This is equivalent to : theta_new = theta_old - alpha * derivative of J w.r.t theta
+			epoch_pbar.update(1)
+
+	return net
 
 class Net(nn.Module):
 	def __init__(self, num_hidden_layers, num_neurons, ninputs, noutputs):
@@ -140,52 +144,40 @@ def navier_cauchy(x, y, net):
 	the Navier Cauchy partial differential equation. 
 	"""
 	u = net([x, y])
-
 	u_x = u[:, 0]
 	u_y = u[:, 1]
 
-	u_x1x = diff(u_x, x) 
-	u_x1y = diff(u_x, y)
-	u_y1y = diff(u_y, y)
-	u_y1x = diff(u_y, x)
-	
-	u_x2x = diff(u_x1x, x)  
-	u_y1xy = diff(u_y1y, x) 
-	u_x2y = diff(u_x1y, y)  
+	u_xx = diff(u_x, x)
+	u_yy = diff(u_y, y)
+	u_xy = diff(u_x, y)
+	v_xy = diff(u_y, x)
 
-	u_x1yx = diff(u_x1x, y)
-	u_y2y = diff(u_y1y, y) 
-	u_y2x = diff(u_y1x, x)
+	divergence_u = u_xx + u_yy
 
-	residue_x = (lambda_ + mu) * (u_x2x + u_y1xy) + mu * (u_x2x + u_x2y) - f[0]
-	residue_y = (lambda_ + mu) * (u_x1yx + u_y2y) + mu * (u_y2x + u_y2y) - f[1]
+	residue_x = lambda_ * divergence_u + 2 * mu * u_xx + mu * (u_xy + v_xy) - f[0]
+	residue_y = lambda_ * divergence_u + 2 * mu * u_yy + mu * (u_xy + v_xy) - f[1]
 
 	return residue_x, residue_y
 
 def diff(u, d):
 	return torch.autograd.grad(u, d, grad_outputs=torch.ones_like(u), create_graph=True, retain_graph=True)[0]
 
-import matplotlib.pyplot as plt
-# Tests
-network, losses = solve_clamped_beam_pytorch(12, 5, 1000)
+def predict(network):
+	x = np.linspace(0, lenght, n_length)
+	y = np.linspace(0, width, n_width)
+	xij, yij = np.meshgrid(x, y)
+	xij = xij.reshape((len(xij.flatten()), 1))
+	yij = yij.reshape((len(yij.flatten()), 1))
 
-# Boundary conditions. 
-x = np.linspace(0, lenght, n_length)
-y = np.linspace(0, width, n_width)
+	tx = Variable(torch.from_numpy(xij).float(), requires_grad=False).to(device)
+	ty = Variable(torch.from_numpy(yij).float(), requires_grad=False).to(device)
+	deform = network([tx, ty]).detach().numpy()
 
-for i in x:
-	for j in y:
-		plt.scatter(i, j, color='Blue')
-		xarr = np.array(i).reshape((1,1))
-		yarr = np.array(j).reshape((1,1))
-		tx = Variable(torch.from_numpy(xarr).float(), requires_grad=False).to(device)
-		ty = Variable(torch.from_numpy(yarr).float(), requires_grad=False).to(device)
-		deform = network([tx, ty]).detach().numpy()
-		newx = i + deform[0,0]
-		newy = j + deform[0,1]
-		plt.scatter(newx, newy, color='Orange')
+	newx = xij + deform[:, 0].reshape((len(deform[:, 0]), 1))
+	newy = yij + deform[:, 1].reshape((len(deform[:, 1]), 1))
 
-plt.grid()
-plt.show()
+	coordinates_after = np.zeros((len(newx), 2))
+	coordinates_after[:, 0], coordinates_after[:, 1] = newx.flatten(), newy.flatten()
 
+	return coordinates_after
 

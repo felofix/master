@@ -75,17 +75,6 @@ def solve_clamped_beam_fenics():
 	return coordinates_before, coordinates_after
 
 
-# Test plotting. 
-coorbefore, coorafter = solve_clamped_beam_fenics()
-
-plt.scatter(coorbefore[:, 0], coorbefore[:, 1], label='Before')
-plt.scatter(coorafter[:, 0], coorafter[:, 1], label='Before')
-plt.show()
-
-
-
-
-
 
 
 
