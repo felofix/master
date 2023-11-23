@@ -16,6 +16,7 @@ To do:
 import numpy as np
 import torch
 import torch.nn as nn
+from torch.optim import LBFGS
 from torch.autograd import Variable
 from tqdm import tqdm
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -40,7 +41,7 @@ f = [0, -rho*g]
 n_length = 11 # + 1
 n_width = 4 # + 1
 
-def solve_clamped_beam_pytorch(n_hid, n_neu, epochs, lr):
+def solve_clamped_beam_pytorch(n_hid, n_neu, epochs, lr, optimizer_type='ADAM', activation_function = torch.tanh):
 	"""
 	PARAMETERS:
 
@@ -52,10 +53,15 @@ def solve_clamped_beam_pytorch(n_hid, n_neu, epochs, lr):
 	n_outputs = 2   # displacement in x and y. 
 
 	# Neural network.
-	net = Net(n_hid, n_neu, n_inputs, n_outputs)
+	net = Net(n_hid, n_neu, n_inputs, n_outputs, activation_function)
 	net = net.to(device)
 	mse_cost_function = torch.nn.MSELoss(reduction ='mean') # Mean squared error
-	optimizer = torch.optim.Adam(net.parameters(), lr=lr)  # Can experiment with different optimizers.
+
+	if optimizer_type == 'ADAM':
+		optimizer = torch.optim.Adam(net.parameters(), lr=lr)
+	elif optimizer_type == 'LBFGS':
+		optimizer = LBFGS(net.parameters(), lr=lr, max_iter=20, max_eval=None, tolerance_grad=1e-07,
+						  tolerance_change=1e-09, history_size=100, line_search_fn=None)
 
 	# Boundary conditions. 
 	bx = np.linspace(0, lenght, n_length)
@@ -73,7 +79,22 @@ def solve_clamped_beam_pytorch(n_hid, n_neu, epochs, lr):
 
 	with tqdm(total=epochs, desc="Epochs") as epoch_pbar:
 		for epoch in range(epochs):
-			optimizer.zero_grad() # to make the gradients zero
+			def closure():
+				optimizer.zero_grad()  # Clear gradients
+				loss = compute_loss()  # You need to define how to compute your loss here
+				loss.backward()  # Backpropagation
+				return loss
+
+			if optimizer_type.lower() == 'LBFGS':
+				# L-BFGS optimizer step requires a closure that re-evaluates the model and returns the loss
+				optimizer.step(closure)
+				
+			elif optimizer_type.lower() == 'ADAM':
+				# For Adam optimizer
+				optimizer.zero_grad()
+				loss = compute_loss()  # Again, define your loss computation
+				loss.backward()
+				optimizer.step()
 
 			# Boundary loss.
 			tbx = Variable(torch.from_numpy(bxij.reshape((len(bxij), 1))).float(), requires_grad=False).to(device)
@@ -120,14 +141,13 @@ def solve_clamped_beam_pytorch(n_hid, n_neu, epochs, lr):
 			loss = mse_fe + mse_cc + mse_bc*10
 
 			loss.backward() # This is for computing gradients using backward propagation
-			optimizer.step()
 			
 			epoch_pbar.update(1)
 
 	return net
 
 class Net(nn.Module):
-	def __init__(self, num_hidden_layers, num_neurons, ninputs, noutputs):
+	def __init__(self, num_hidden_layers, num_neurons, ninputs, noutputs, activation_function):
 		"""Initializing the neural network. 
 		Trying to learn how the network runs. 
 		"""
@@ -138,6 +158,7 @@ class Net(nn.Module):
 		self.noutputs = noutputs
 		self.hidden_layers = nn.ModuleList()
 		self.hidden_layers.append(nn.Linear(self.ninputs, self.num_neurons))
+		self.activation_function = activation_function
 
 		for hl in range(1, self.num_hidden_layers):
 			self.hidden_layers.append(nn.Linear(self.num_neurons, self.num_neurons))
@@ -149,10 +170,10 @@ class Net(nn.Module):
 		Forward step of the neural network. 
 		"""
 		layer_inputs = torch.cat(inputs, axis=1) 
-		layer = torch.tanh(self.hidden_layers[0](layer_inputs))
+		layer = self.activation_function(self.hidden_layers[0](layer_inputs))
 
 		for hl in range(1, self.num_hidden_layers):
-			layer = torch.tanh(self.hidden_layers[hl](layer))
+			layer = self.activation_function(self.hidden_layers[hl](layer))
 
 		output = self.output_layer(layer) 
 		return output
