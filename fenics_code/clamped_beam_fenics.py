@@ -72,7 +72,7 @@ def solve_clamped_beam_fenics():
 	# Now mesh.coordinates() will return the new coordinates of the mesh vertices
 	coordinates_after = mesh.coordinates()
 
-	return coordinates_before, coordinates_after
+	return coordinates_before, coordinates_after, coordinates_after - coordinates_before
 
 
 

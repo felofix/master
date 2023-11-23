@@ -20,6 +20,8 @@ from torch.autograd import Variable
 from tqdm import tqdm
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 from torch.optim import lr_scheduler
+fenics_before = np.loadtxt("../data/clamped_beam_fenics_before.txt", delimiter=',')
+fenics_displacement = np.loadtxt("../data/clamped_beam_fenics_displacement.txt", delimiter=',')
 
 torch.manual_seed(2023)
 np.random.seed(2023)
@@ -52,9 +54,8 @@ def solve_clamped_beam_pytorch(n_hid, n_neu, epochs, lr):
 	# Neural network.
 	net = Net(n_hid, n_neu, n_inputs, n_outputs)
 	net = net.to(device)
-	mse_cost_function = torch.nn.MSELoss() 			# Mean squared error
+	mse_cost_function = torch.nn.MSELoss(reduction ='mean') # Mean squared error
 	optimizer = torch.optim.Adam(net.parameters(), lr=lr)  # Can experiment with different optimizers.
-	scheduler = lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.5)
 
 	# Boundary conditions. 
 	bx = np.linspace(0, lenght, n_length)
@@ -62,6 +63,13 @@ def solve_clamped_beam_pytorch(n_hid, n_neu, epochs, lr):
 	bxij, byij = np.meshgrid(bx, by)
 	dirichlet = np.arange(0, n_width * n_length, n_length)
 	bxij, byij = bxij.flatten(), byij.flatten()
+	bxij, byij = bxij[dirichlet], byij[dirichlet] 
+
+	# Fenics loss points.
+	random_amount = 5
+	random_indices = np.random.choice(fenics_before.shape[0], random_amount, replace=False)
+	random_points= fenics_before[random_indices, :]
+	random_displacements = fenics_displacement[random_indices, :]
 
 	with tqdm(total=epochs, desc="Epochs") as epoch_pbar:
 		for epoch in range(epochs):
@@ -72,16 +80,17 @@ def solve_clamped_beam_pytorch(n_hid, n_neu, epochs, lr):
 			tby = Variable(torch.from_numpy(byij.reshape((len(byij), 1))).float(), requires_grad=False).to(device)
 			zeros_bc = Variable(torch.from_numpy(np.zeros((len(dirichlet), 1))).float(), requires_grad=False).to(device)
 			predicted_bc = net([tbx, tby])
-			bcx = predicted_bc[:, 0][dirichlet].reshape(len(zeros_bc), 1)
-			bcy = predicted_bc[:, 1][dirichlet].reshape(len(zeros_bc), 1)
+
+			bcx = predicted_bc[:, 0].reshape(len(zeros_bc), 1)
+			bcy = predicted_bc[:, 1].reshape(len(zeros_bc), 1)
 
 			mse_ux = mse_cost_function(zeros_bc, bcx)
 			mse_uy = mse_cost_function(zeros_bc, bcy)
 			mse_bc = mse_ux + mse_uy
 
 			# Collocation points. 
-			xc = np.random.uniform(low=0.0, high=lenght, size=n_length)
-			yc = np.random.uniform(low=0.0, high=width, size=n_width)
+			xc = np.random.uniform(low=0.0001, high=lenght, size=n_length)
+			yc = np.random.uniform(low=0.0001, high=width, size=n_width)
 
 			xcij, ycij = np.meshgrid(xc, yc)
 			xcij, ycij = xcij.flatten(), ycij.flatten()
@@ -91,18 +100,28 @@ def solve_clamped_beam_pytorch(n_hid, n_neu, epochs, lr):
 			tyc = Variable(torch.from_numpy(ycij).float(), requires_grad=True).to(device)
 			zeros_collcation = Variable(torch.from_numpy(np.zeros((len(txc), 1))).float(), requires_grad=False).to(device)
 
-			res_x, res_y = navier_cauchy(txc, tyc, net)
+			res_x, res_y = navier_cauchy_loss(txc, tyc, net)
 			
 			mse_xc = mse_cost_function(zeros_collcation, res_x)
 			mse_yc = mse_cost_function(zeros_collcation, res_y)
 			mse_cc = mse_xc + mse_yc
-			
-			loss = 100*mse_bc + mse_cc
 
+			# Fenics loss.
+			fx = Variable(torch.from_numpy(random_points[:,0].reshape((len(random_points[:,0]), 1))).float(), requires_grad=False).to(device)
+			fy = Variable(torch.from_numpy(random_points[:,1].reshape((len(random_points[:,1]), 1))).float(), requires_grad=False).to(device)
+			fxd = Variable(torch.from_numpy(random_displacements[:,0].reshape((len(random_displacements[:,0]),))).float(), requires_grad=False).to(device)
+			fyd = Variable(torch.from_numpy(random_displacements[:,1].reshape((len(random_displacements[:,1]),))).float(), requires_grad=False).to(device)
+
+			f_loss_x, f_loss_y = fenics_loss(fx, fy, net)
+			mse_fe_x = mse_cost_function(fxd, f_loss_x)
+			mse_fe_y = mse_cost_function(fyd, f_loss_y)
+			mse_fe = mse_fe_x + mse_fe_y
+
+			loss = mse_fe + mse_cc + mse_bc*10
 
 			loss.backward() # This is for computing gradients using backward propagation
 			optimizer.step()
-			scheduler.step() # This is equivalent to : theta_new = theta_old - alpha * derivative of J w.r.t theta
+			
 			epoch_pbar.update(1)
 
 	return net
@@ -138,11 +157,7 @@ class Net(nn.Module):
 		output = self.output_layer(layer) 
 		return output
 
-
-def navier_cauchy(x, y, net):
-	"""Finds the residual for
-	the Navier Cauchy partial differential equation. 
-	"""
+def navier_cauchy_loss(x, y, net):
 	u = net([x, y])
 	u_x = u[:, 0]
 	u_y = u[:, 1]
@@ -150,14 +165,24 @@ def navier_cauchy(x, y, net):
 	u_xx = diff(u_x, x)
 	u_yy = diff(u_y, y)
 	u_xy = diff(u_x, y)
-	v_xy = diff(u_y, x)
+	u_yx = diff(u_y, x)
 
-	divergence_u = u_xx + u_yy
+	u_y_xx = diff(u_xx, y)
+	u_x_yy = diff(u_yy, y)
+	u_x_xx = diff(u_xx, x)
+	u_y_xy = diff(u_xy, y)
+	u_y_yy = diff(u_yy, y)
+	u_x_yx = diff(u_yx, x)
 
-	residue_x = lambda_ * divergence_u + 2 * mu * u_xx + mu * (u_xy + v_xy) - f[0]
-	residue_y = lambda_ * divergence_u + 2 * mu * u_yy + mu * (u_xy + v_xy) - f[1]
+	residue_x = (lambda_ + mu)*(u_x_xx + u_x_yy) + mu*(u_x_xx + u_y_xy) + f[0]
+	residue_y = (lambda_ + mu)*(u_y_xx + u_y_yy) + mu*(u_x_yx + u_y_yy) + f[1]
 
 	return residue_x, residue_y
+
+def fenics_loss(x, y, net):
+	u = net([x, y])
+	return u[:, 0], u[:, 1]
+
 
 def diff(u, d):
 	return torch.autograd.grad(u, d, grad_outputs=torch.ones_like(u), create_graph=True, retain_graph=True)[0]
