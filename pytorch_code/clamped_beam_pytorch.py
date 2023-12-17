@@ -21,8 +21,12 @@ from torch.autograd import Variable
 from tqdm import tqdm
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 from torch.optim import lr_scheduler
+from sklearn.metrics import mean_squared_error
+
+
 fenics_before = np.loadtxt("../data/clamped_beam_fenics_before.txt", delimiter=',')
 fenics_displacement = np.loadtxt("../data/clamped_beam_fenics_displacement.txt", delimiter=',')
+fenics_after = np.loadtxt("../data/clamped_beam_fenics.txt", delimiter=',')
 
 torch.manual_seed(2023)
 np.random.seed(2023)
@@ -41,7 +45,7 @@ f = [0, -rho*g]
 n_length = 11 # + 1
 n_width = 4 # + 1
 
-def solve_clamped_beam_pytorch(n_hid, n_neu, epochs, lr, optimizer_type='ADAM', activation_function = torch.tanh):
+def solve_clamped_beam_pytorch(n_hid, n_neu, epochs, lr, activation_function = torch.tanh, verbose=False, random_amount = 5):
 	"""
 	PARAMETERS:
 
@@ -56,12 +60,7 @@ def solve_clamped_beam_pytorch(n_hid, n_neu, epochs, lr, optimizer_type='ADAM', 
 	net = Net(n_hid, n_neu, n_inputs, n_outputs, activation_function)
 	net = net.to(device)
 	mse_cost_function = torch.nn.MSELoss(reduction ='mean') # Mean squared error
-
-	if optimizer_type == 'ADAM':
-		optimizer = torch.optim.Adam(net.parameters(), lr=lr)
-	elif optimizer_type == 'LBFGS':
-		optimizer = LBFGS(net.parameters(), lr=lr, max_iter=20, max_eval=None, tolerance_grad=1e-07,
-						  tolerance_change=1e-09, history_size=100, line_search_fn=None)
+	optimizer = torch.optim.Adam(net.parameters(), lr=lr)
 
 	# Boundary conditions. 
 	bx = np.linspace(0, lenght, n_length)
@@ -72,29 +71,16 @@ def solve_clamped_beam_pytorch(n_hid, n_neu, epochs, lr, optimizer_type='ADAM', 
 	bxij, byij = bxij[dirichlet], byij[dirichlet] 
 
 	# Fenics loss points.
-	random_amount = 5
 	random_indices = np.random.choice(fenics_before.shape[0], random_amount, replace=False)
 	random_points= fenics_before[random_indices, :]
 	random_displacements = fenics_displacement[random_indices, :]
 
+	losses = []
+
+
 	with tqdm(total=epochs, desc="Epochs") as epoch_pbar:
 		for epoch in range(epochs):
-			def closure():
-				optimizer.zero_grad()  # Clear gradients
-				loss = compute_loss()  # You need to define how to compute your loss here
-				loss.backward()  # Backpropagation
-				return loss
-
-			if optimizer_type.lower() == 'LBFGS':
-				# L-BFGS optimizer step requires a closure that re-evaluates the model and returns the loss
-				optimizer.step(closure)
-				
-			elif optimizer_type.lower() == 'ADAM':
-				# For Adam optimizer
-				optimizer.zero_grad()
-				loss = compute_loss()  # Again, define your loss computation
-				loss.backward()
-				optimizer.step()
+			optimizer.zero_grad()
 
 			# Boundary loss.
 			tbx = Variable(torch.from_numpy(bxij.reshape((len(bxij), 1))).float(), requires_grad=False).to(device)
@@ -138,13 +124,23 @@ def solve_clamped_beam_pytorch(n_hid, n_neu, epochs, lr, optimizer_type='ADAM', 
 			mse_fe_y = mse_cost_function(fyd, f_loss_y)
 			mse_fe = mse_fe_x + mse_fe_y
 
+			# For Adam optimizer
 			loss = mse_fe + mse_cc + mse_bc*10
 
-			loss.backward() # This is for computing gradients using backward propagation
-			
+			if verbose and epoch % 1000 == 0:
+				predicted = predict(net)
+				mse = mean_squared_error(fenics_after, predicted)
+				losses.append(mse)
+
+			loss.backward()
+			optimizer.step()
+
 			epoch_pbar.update(1)
 
-	return net
+	if not verbose:
+		return net
+	else:
+		return net, losses
 
 class Net(nn.Module):
 	def __init__(self, num_hidden_layers, num_neurons, ninputs, noutputs, activation_function):
@@ -227,3 +223,4 @@ def predict(network):
 
 	return coordinates_after
 
+print(g)
